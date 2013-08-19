@@ -17,6 +17,7 @@ union socket_message {
 	} data;
 	struct {
 		int id;
+		int session;
 	} close;
 	struct {
 		int id;
@@ -38,11 +39,11 @@ void socket_server_exit(struct socket_server *);
 
 // return -1 when error
 int socket_server_send(struct socket_server *, int id, const void * buffer, int sz);
-void socket_server_close(struct socket_server *, int id);
 
 // ctrl command below returns session
 int socket_server_listen(struct socket_server *, const char * addr, int port, int backlog);
 int socket_server_connect(struct socket_server *, const char * addr, int port);
 int socket_server_bind(struct socket_server *, int fd);
+int socket_server_close(struct socket_server *, int id);
 
 #endif
