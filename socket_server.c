@@ -518,6 +518,9 @@ ctrl_cmd(struct socket_server *ss, struct socket_message *result) {
 	case 'O':
 		return open_socket(ss, (struct request_open *)buffer, result);
 	case 'X':
+		result->id = 0;
+		result->ud = 0;
+		result->data = NULL;
 		return SOCKET_EXIT;
 	case 'D':
 		return send_socket(ss, (struct request_send *)buffer, result);
