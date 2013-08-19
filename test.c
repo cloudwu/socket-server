@@ -23,10 +23,13 @@ _poll(void * ud) {
 			printf("close [id=%d]\n",result.close.id);
 			break;
 		case SOCKET_OPEN:
-			printf("open [session=%d id=%d] %s\n",result.open.session,result.open.id,result.open.addr);
+			printf("open [id=%d] %s\n",result.open.id,result.open.addr);
 			break;
 		case SOCKET_ERROR:
-			printf("error [session=%d id=%d]\n",result.error.session,result.error.id);
+			printf("error [id=%d]\n",result.error.id);
+			break;
+		case SOCKET_ACCEPT:
+			printf("accept [id=%d %s] from [%d]\n",result.accept.id, result.accept.addr, result.accept.listen);
 			break;
 		}
 	}
@@ -37,9 +40,12 @@ test(struct socket_server *ss) {
 	pthread_t pid;
 	pthread_create(&pid, NULL, _poll, ss);
 
-	socket_server_connect(ss,"127.0.0.1",80);
-	socket_server_listen(ss,"127.0.0.1",8888,32);
-	socket_server_bind(ss,1);
+	int c = socket_server_connect(ss,"127.0.0.1",80);
+	printf("connecting %d\n",c);
+	int l = socket_server_listen(ss,"127.0.0.1",8888,32);
+	printf("listening %d\n",l);
+	int b = socket_server_bind(ss,1);
+	printf("binding stdin %d\n",b);
 	sleep(5);
 	socket_server_exit(ss);
 

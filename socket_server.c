@@ -19,11 +19,12 @@
 #define MIN_READ_BUFFER 64
 
 #define SOCKET_TYPE_INVALID 0
-#define SOCKET_TYPE_LISTEN 1
-#define SOCKET_TYPE_CONNECTING 2
-#define SOCKET_TYPE_CONNECTED 3
-#define SOCKET_TYPE_HALFCLOSE 4
-#define SOCKET_TYPE_BIND 5
+#define SOCKET_TYPE_RESERVE 1
+#define SOCKET_TYPE_LISTEN 2
+#define SOCKET_TYPE_CONNECTING 3
+#define SOCKET_TYPE_CONNECTED 4
+#define SOCKET_TYPE_HALFCLOSE 5
+#define SOCKET_TYPE_BIND 6
 
 #define MAX_SOCKET (1<<MAX_SOCKET_P)
 
@@ -37,8 +38,6 @@ struct write_buffer {
 struct socket {
 	int fd;
 	int id;
-	int open_session;
-	int close_session;
 	int type;
 	int size;
 	struct write_buffer * head;
@@ -52,14 +51,13 @@ struct socket_server {
 	int alloc_id;
 	int event_n;
 	int event_index;
-	int session_id;
 	struct event ev[MAX_EVENT];
 	struct socket slot[MAX_SOCKET];
 	char buffer[MAX_INFO];
 };
 
 struct request_open {
-	int session;
+	int id;
 	int port;
 	char host[1];
 };
@@ -71,19 +69,18 @@ struct request_send {
 };
 
 struct request_close {
-	int session;
 	int id;
 };
 
 struct request_listen {
-	int session;
+	int id;
 	int port;
 	int backlog;
 	char host[1];
 };
 
 struct request_bind {
-	int session;
+	int id;
 	int fd;
 };
 
@@ -107,6 +104,27 @@ union sockaddr_all {
 
 #define MALLOC malloc
 #define FREE free
+
+static int
+reverve_id(struct socket_server *ss) {
+	int i;
+	for (i=0;i<MAX_SOCKET;i++) {
+		int id = __sync_add_and_fetch(&(ss->alloc_id), 1);
+		if (id < 0) {
+			id = __sync_fetch_and_and(&(ss->alloc_id), 0x7fffffff);
+		}
+		struct socket *s = &ss->slot[id % MAX_SOCKET];
+		if (s->type == SOCKET_TYPE_INVALID) {
+			if (__sync_bool_compare_and_swap(&s->type, SOCKET_TYPE_INVALID, SOCKET_TYPE_RESERVE)) {
+				return id;
+			} else {
+				// retry
+				--i;
+			}
+		}
+	}
+	return -1;
+}
 
 struct socket_server * 
 socket_server_create() {
@@ -145,7 +163,6 @@ socket_server_create() {
 	ss->alloc_id = 0;
 	ss->event_n = 0;
 	ss->event_index = 0;
-	ss->session_id = 0;
 
 	return ss;
 }
@@ -155,6 +172,7 @@ force_close(struct socket_server *ss, struct socket *s) {
 	if (s->type == SOCKET_TYPE_INVALID) {
 		return;
 	}
+	assert(s->type != SOCKET_TYPE_RESERVE);
 	struct write_buffer *wb = s->head;
 	while (wb) {
 		struct write_buffer *tmp = wb;
@@ -174,7 +192,10 @@ void
 socket_server_release(struct socket_server *ss) {
 	int i;
 	for (i=0;i<MAX_SOCKET;i++) {
-		force_close(ss, &ss->slot[i]);
+		struct socket *s = &ss->slot[i];
+		if (s->type != SOCKET_TYPE_RESERVE) {
+			force_close(ss, s);
+		}
 	}
 	close(ss->client_fd);
 	close(ss->server_fd);
@@ -206,32 +227,27 @@ block_read(int fd, void * buffer, int sz) {
 }
 
 static struct socket *
-new_fd(struct socket_server *ss, int fd) {
-	int i;
-	for (i=0;i<MAX_SOCKET;i++) {
-		int id = ss->alloc_id + i + 1;
-		struct socket * s = &ss->slot[id % MAX_SOCKET];
-		if (s->type == SOCKET_TYPE_INVALID) {
-			if (sp_add(ss->event_fd, fd, s)) {
-				return NULL;
-			}
-			s->id = id;
-			s->fd = fd;
-			s->size = MIN_READ_BUFFER;
-			s->open_session = 0;
-			s->close_session = 0;
-			assert(s->head == NULL);
-			assert(s->tail == NULL);
-			ss->alloc_id = id;
-			return s;
-		}
+new_fd(struct socket_server *ss, int id, int fd) {
+	struct socket * s = &ss->slot[id % MAX_SOCKET];
+	assert(s->type == SOCKET_TYPE_RESERVE);
+
+	if (sp_add(ss->event_fd, fd, s)) {
+		s->type = SOCKET_TYPE_INVALID;
+		return NULL;
 	}
-	return NULL;
+
+	s->id = id;
+	s->fd = fd;
+	s->size = MIN_READ_BUFFER;
+	assert(s->head == NULL);
+	assert(s->tail == NULL);
+	return s;
 }
 
 // return -1 when connecting
 static int
 open_socket(struct socket_server *ss, struct request_open * request, union socket_message *result) {
+	int id = request->id;
 	struct socket *ns;
 	int status;
 	struct addrinfo ai_hints;
@@ -268,7 +284,7 @@ open_socket(struct socket_server *ss, struct request_open * request, union socke
 		goto _failed;
 	}
 
-	ns = new_fd(ss, sock);
+	ns = new_fd(ss, id, sock);
 	if (ns == NULL) {
 		close(sock);
 		goto _failed;
@@ -277,7 +293,6 @@ open_socket(struct socket_server *ss, struct request_open * request, union socke
 	if(status == 0) {
 		ns->type = SOCKET_TYPE_CONNECTED;
 		result->open.id = ns->id;
-		result->open.session = request->session;
 		result->open.fd = sock;
 		struct sockaddr * addr = ai_ptr->ai_addr;
 		void * sin_addr = (ai_ptr->ai_family == AF_INET) ? (void*)&((struct sockaddr_in *)addr)->sin_addr : (void*)&((struct sockaddr_in6 *)addr)->sin6_addr;
@@ -290,7 +305,6 @@ open_socket(struct socket_server *ss, struct request_open * request, union socke
 		return SOCKET_OPEN;
 	} else {
 		ns->type = SOCKET_TYPE_CONNECTING;
-		ns->open_session = request->session;
 		sp_write(ss->event_fd, ns->fd, ns, true);
 	}
 
@@ -298,8 +312,8 @@ open_socket(struct socket_server *ss, struct request_open * request, union socke
 	return -1;
 _failed:
 	freeaddrinfo( ai_list );
+	ss->slot[id % MAX_SOCKET].type = SOCKET_TYPE_INVALID;
 	result->error.id = 0;
-	result->error.session = request->session;
 	return SOCKET_ERROR;
 }
 
@@ -317,7 +331,6 @@ send_buffer(struct socket_server *ss, struct socket *s, union socket_message *re
 					return 0;
 				}
 				result->close.id = s->id;
-				result->close.session = s->close_session;
 				force_close(ss,s);
 				return SOCKET_CLOSE;
 			}
@@ -357,7 +370,6 @@ send_socket(struct socket_server *ss, struct request_send * request, union socke
 			default:
 				fprintf(stderr, "socket-server: write to %d (fd=%d) error.",id,s->fd);
 				result->close.id = id;
-				result->close.session = s->close_session;
 				return SOCKET_CLOSE;
 			}
 		}
@@ -390,6 +402,7 @@ send_socket(struct socket_server *ss, struct request_send * request, union socke
 
 static int
 listen_socket(struct socket_server *ss, struct request_listen * request, union socket_message *result) {
+	int id = request->id;
 	// only support ipv4
 	// todo: support ipv6 by getaddrinfo
 	uint32_t addr = INADDR_ANY;
@@ -398,10 +411,8 @@ listen_socket(struct socket_server *ss, struct request_listen * request, union s
 	}
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
-		result->error.id = 0;
-		result->error.session = request->session;
-
-		return SOCKET_ERROR;
+		result->error.id = id;
+		goto _failed_noclose;
 	}
 	int reuse = 1;
 	if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (void *)&reuse, sizeof(int))==-1) {
@@ -419,17 +430,17 @@ listen_socket(struct socket_server *ss, struct request_listen * request, union s
 	if (listen(listen_fd, request->backlog) == -1) {
 		goto _failed;
 	}
-	struct socket *s = new_fd(ss, listen_fd);
+	struct socket *s = new_fd(ss, id, listen_fd);
 	if (s == NULL) {
 		goto _failed;
 	}
 	s->type = SOCKET_TYPE_LISTEN;
-	s->open_session = request->session;
 	return -1;
 _failed:
 	close(listen_fd);
+_failed_noclose:
 	result->error.id = 0;
-	result->error.session = request->session;
+	ss->slot[id % MAX_SOCKET].type = SOCKET_TYPE_INVALID;
 
 	return SOCKET_ERROR;
 }
@@ -440,10 +451,8 @@ close_socket(struct socket_server *ss, struct request_close *request, union sock
 	struct socket * s = &ss->slot[id % MAX_SOCKET];
 	if (s->type == SOCKET_TYPE_INVALID || s->id != id) {
 		result->close.id = id;
-		result->close.session = request->session;
 		return SOCKET_CLOSE;
 	}
-	s->close_session = request->session;
 	if (s->head) { 
 		int type = send_buffer(ss,s,result);
 		if (type != -1)
@@ -452,7 +461,6 @@ close_socket(struct socket_server *ss, struct request_close *request, union sock
 	if (s->head == NULL) {
 		force_close(ss,s);
 		result->close.id = id;
-		result->close.session = request->session;
 		return SOCKET_CLOSE;
 	}
 	s->type = SOCKET_TYPE_HALFCLOSE;
@@ -462,17 +470,17 @@ close_socket(struct socket_server *ss, struct request_close *request, union sock
 
 static int
 bind_socket(struct socket_server *ss, struct request_bind *request, union socket_message *result) {
-	struct socket *s = new_fd(ss, request->fd);
+	int id = request->id;
+	struct socket *s = new_fd(ss, id, request->fd);
 	if (s == NULL) {
-		result->error.session = request->session;
-		result->error.id = 0;
+		result->error.id = id;
 		return SOCKET_ERROR;
 	}
 	sp_nonblocking(request->fd);
 	s->type = SOCKET_TYPE_BIND;
 	result->open.id = s->id;
-	result->open.session = request->session;
 	result->open.fd = request->fd;
+	result->open.addr = "binding";
 	return SOCKET_OPEN;
 }
 
@@ -525,7 +533,6 @@ forward_message(struct socket_server *ss, struct socket *s, union socket_message
 		default:
 			// close when error
 			result->error.id = s->id;
-			result->error.session = 0;
 			force_close(ss, s);
 			return SOCKET_ERROR;
 		}
@@ -534,7 +541,6 @@ forward_message(struct socket_server *ss, struct socket *s, union socket_message
 	if (n==0) {
 		FREE(buffer);
 		result->close.id = s->id;
-		result->close.session = s->close_session;
 		force_close(ss, s);
 		return SOCKET_CLOSE;
 	}
@@ -563,12 +569,10 @@ report_connect(struct socket_server *ss, struct socket *s, union socket_message 
 	int code = getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &len);  
 	if (code < 0 || error) {  
 		result->error.id = s->id;
-		result->error.session = s->open_session;
 		force_close(ss,s);
 		return SOCKET_ERROR;
 	} else {
 		s->type = SOCKET_TYPE_CONNECTED;
-		result->open.session = s->open_session;
 		result->open.id = s->id;
 		result->open.fd = s->fd;
 		sp_write(ss->event_fd, s->fd, s, false);
@@ -595,21 +599,26 @@ report_accept(struct socket_server *ss, struct socket *s, union socket_message *
 	if (client_fd < 0) {
 		return 0;
 	}
+	int id = reverve_id(ss);
+	if (id < 0) {
+		close(client_fd);
+		return 0;
+	}
 	sp_nonblocking(client_fd);
-	struct socket *ns = new_fd(ss, client_fd);
+	struct socket *ns = new_fd(ss, id, client_fd);
 	if (ns == NULL) {
 		close(client_fd);
 		return 0;
 	}
 	ns->type = SOCKET_TYPE_CONNECTED;
-	result->open.id = ns->id;
-	result->open.session = s->open_session;
-	result->open.fd = s->fd;
-	result->open.addr = NULL;
+	result->accept.id = id;
+	result->accept.listen = s->id;
+	result->accept.fd = ns->fd;
+	result->accept.addr = NULL;
 
 	void * sin_addr = (u.s.sa_family == AF_INET) ? (void*)&u.v4.sin_addr : (void *)&u.v6.sin6_addr;
 	if (inet_ntop(u.s.sa_family, sin_addr, ss->buffer, sizeof(ss->buffer))) {
-		result->open.addr = ss->buffer;
+		result->accept.addr = ss->buffer;
 	}
 
 	return 1;
@@ -640,7 +649,7 @@ socket_server_poll(struct socket_server *ss, union socket_message * result) {
 			return report_connect(ss, s, result);
 		case SOCKET_TYPE_LISTEN:
 			if (report_accept(ss, s, result)) {
-				return SOCKET_OPEN;
+				return SOCKET_ACCEPT;
 			} 
 			break;
 		case SOCKET_TYPE_INVALID:
@@ -664,11 +673,6 @@ socket_server_poll(struct socket_server *ss, union socket_message * result) {
 	}
 }
 
-static inline int
-allocsession(struct socket_server *ss) {
-	return __sync_add_and_fetch(&(ss->session_id), 1);
-}
-
 static void
 send_request(struct socket_server *ss, struct request_package *request, char type, int len) {
 	request->header[6] = (uint8_t)type;
@@ -684,12 +688,12 @@ socket_server_connect(struct socket_server *ss, const char * addr, int port) {
 		fprintf(stderr, "socket-server : Invalid addr %s.\n",addr);
 		return 0;
 	}
-	int session = allocsession(ss);
-	request.u.open.session = session;
+	int id = reverve_id(ss);
+	request.u.open.id = id;
 	request.u.open.port = port;
 	strcpy(request.u.open.host, addr);
 	send_request(ss, &request, 'O', sizeof(request.u.open) + len);
-	return session;
+	return id;
 }
 
 // return -1 when error
@@ -699,6 +703,7 @@ socket_server_send(struct socket_server *ss, int id, const void * buffer, int sz
 	if (s->id != id || s->type == SOCKET_TYPE_INVALID) {
 		return -1;
 	}
+	assert(s->type != SOCKET_TYPE_RESERVE);
 
 	struct request_package request;
 	request.u.send.id = id;
@@ -715,14 +720,11 @@ socket_server_exit(struct socket_server *ss) {
 	send_request(ss, &request, 'X', 0);
 }
 
-int
+void
 socket_server_close(struct socket_server *ss, int id) {
 	struct request_package request;
-	int session = allocsession(ss);
 	request.u.close.id = id;
-	request.u.close.session = session;
 	send_request(ss, &request, 'K', sizeof(request.u.close));
-	return session;
 }
 
 int 
@@ -733,8 +735,8 @@ socket_server_listen(struct socket_server *ss, const char * addr, int port, int 
 		fprintf(stderr, "socket-server : Invalid listen addr %s.\n",addr);
 		return 0;
 	}
-	int session = allocsession(ss);
-	request.u.listen.session = session;
+	int id = reverve_id(ss);
+	request.u.listen.id = id;
 	request.u.listen.port = port;
 	request.u.listen.backlog = backlog;
 	if (len == 0) {
@@ -743,16 +745,16 @@ socket_server_listen(struct socket_server *ss, const char * addr, int port, int 
 		strcpy(request.u.listen.host, addr);
 	}
 	send_request(ss, &request, 'L', sizeof(request.u.listen) + len);
-	return session;
+	return id;
 }
 
 int
 socket_server_bind(struct socket_server *ss, int fd) {
 	struct request_package request;
-	int session = allocsession(ss);
-	request.u.bind.session = session;
+	int id = reverve_id(ss);
+	request.u.bind.id = id;
 	request.u.bind.fd = fd;
 	send_request(ss, &request, 'B', sizeof(request.u.bind));
-	return session;
+	return id;
 }
 
