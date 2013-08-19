@@ -246,7 +246,7 @@ new_fd(struct socket_server *ss, int id, int fd) {
 
 // return -1 when connecting
 static int
-open_socket(struct socket_server *ss, struct request_open * request, union socket_message *result) {
+open_socket(struct socket_server *ss, struct request_open * request, struct socket_message *result) {
 	int id = request->id;
 	struct socket *ns;
 	int status;
@@ -292,14 +292,14 @@ open_socket(struct socket_server *ss, struct request_open * request, union socke
 
 	if(status == 0) {
 		ns->type = SOCKET_TYPE_CONNECTED;
-		result->open.id = ns->id;
-		result->open.fd = sock;
+		result->id = ns->id;
+		result->ud = 0;
 		struct sockaddr * addr = ai_ptr->ai_addr;
 		void * sin_addr = (ai_ptr->ai_family == AF_INET) ? (void*)&((struct sockaddr_in *)addr)->sin_addr : (void*)&((struct sockaddr_in6 *)addr)->sin6_addr;
 		if (inet_ntop(ai_ptr->ai_family, sin_addr, ss->buffer, sizeof(ss->buffer))) {
-			result->open.addr = ss->buffer;
+			result->data = ss->buffer;
 		} else {
-			result->open.addr = NULL;
+			result->data = NULL;
 		}
 		freeaddrinfo( ai_list );
 		return SOCKET_OPEN;
@@ -313,12 +313,14 @@ open_socket(struct socket_server *ss, struct request_open * request, union socke
 _failed:
 	freeaddrinfo( ai_list );
 	ss->slot[id % MAX_SOCKET].type = SOCKET_TYPE_INVALID;
-	result->error.id = 0;
+	result->id = 0;
+	result->ud = 0;
+	result->data = NULL;
 	return SOCKET_ERROR;
 }
 
 static int
-send_buffer(struct socket_server *ss, struct socket *s, union socket_message *result) {
+send_buffer(struct socket_server *ss, struct socket *s, struct socket_message *result) {
 	while (s->head) {
 		struct write_buffer * tmp = s->head;
 		for (;;) {
@@ -330,7 +332,9 @@ send_buffer(struct socket_server *ss, struct socket *s, union socket_message *re
 				case EAGAIN:
 					return 0;
 				}
-				result->close.id = s->id;
+				result->id = s->id;
+				result->ud = 0;
+				result->data = NULL;
 				force_close(ss,s);
 				return SOCKET_CLOSE;
 			}
@@ -352,7 +356,7 @@ send_buffer(struct socket_server *ss, struct socket *s, union socket_message *re
 }
 
 static int
-send_socket(struct socket_server *ss, struct request_send * request, union socket_message *result) {
+send_socket(struct socket_server *ss, struct request_send * request, struct socket_message *result) {
 	int id = request->id;
 	struct socket * s = &ss->slot[id % MAX_SOCKET];
 	if (s->type == SOCKET_TYPE_INVALID || s->id != id || s->type == SOCKET_TYPE_HALFCLOSE) {
@@ -369,7 +373,9 @@ send_socket(struct socket_server *ss, struct request_send * request, union socke
 				break;
 			default:
 				fprintf(stderr, "socket-server: write to %d (fd=%d) error.",id,s->fd);
-				result->close.id = id;
+				result->id = id;
+				result->ud = 0;
+				result->data = NULL;
 				return SOCKET_CLOSE;
 			}
 		}
@@ -401,7 +407,7 @@ send_socket(struct socket_server *ss, struct request_send * request, union socke
 }
 
 static int
-listen_socket(struct socket_server *ss, struct request_listen * request, union socket_message *result) {
+listen_socket(struct socket_server *ss, struct request_listen * request, struct socket_message *result) {
 	int id = request->id;
 	// only support ipv4
 	// todo: support ipv6 by getaddrinfo
@@ -411,7 +417,6 @@ listen_socket(struct socket_server *ss, struct request_listen * request, union s
 	}
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
-		result->error.id = id;
 		goto _failed_noclose;
 	}
 	int reuse = 1;
@@ -439,18 +444,22 @@ listen_socket(struct socket_server *ss, struct request_listen * request, union s
 _failed:
 	close(listen_fd);
 _failed_noclose:
-	result->error.id = 0;
+	result->id = id;
+	result->ud = 0;
+	result->data = NULL;
 	ss->slot[id % MAX_SOCKET].type = SOCKET_TYPE_INVALID;
 
 	return SOCKET_ERROR;
 }
 
 static int
-close_socket(struct socket_server *ss, struct request_close *request, union socket_message *result) {
+close_socket(struct socket_server *ss, struct request_close *request, struct socket_message *result) {
 	int id = request->id;
 	struct socket * s = &ss->slot[id % MAX_SOCKET];
 	if (s->type == SOCKET_TYPE_INVALID || s->id != id) {
-		result->close.id = id;
+		result->id = id;
+		result->ud = 0;
+		result->data = NULL;
 		return SOCKET_CLOSE;
 	}
 	if (s->head) { 
@@ -460,7 +469,9 @@ close_socket(struct socket_server *ss, struct request_close *request, union sock
 	}
 	if (s->head == NULL) {
 		force_close(ss,s);
-		result->close.id = id;
+		result->id = id;
+		result->ud = 0;
+		result->data = NULL;
 		return SOCKET_CLOSE;
 	}
 	s->type = SOCKET_TYPE_HALFCLOSE;
@@ -469,24 +480,26 @@ close_socket(struct socket_server *ss, struct request_close *request, union sock
 }
 
 static int
-bind_socket(struct socket_server *ss, struct request_bind *request, union socket_message *result) {
+bind_socket(struct socket_server *ss, struct request_bind *request, struct socket_message *result) {
 	int id = request->id;
 	struct socket *s = new_fd(ss, id, request->fd);
 	if (s == NULL) {
-		result->error.id = id;
+		result->id = id;
+		result->ud = 0;
+		result->data = NULL;
 		return SOCKET_ERROR;
 	}
 	sp_nonblocking(request->fd);
 	s->type = SOCKET_TYPE_BIND;
-	result->open.id = s->id;
-	result->open.fd = request->fd;
-	result->open.addr = "binding";
+	result->id = s->id;
+	result->ud = 0;
+	result->data = "binding";
 	return SOCKET_OPEN;
 }
 
 // return type
 static int
-ctrl_cmd(struct socket_server *ss, union socket_message *result) {
+ctrl_cmd(struct socket_server *ss, struct socket_message *result) {
 	int fd = ss->server_fd;
 	uint8_t header[2];
 	block_read(fd, header, sizeof(header));
@@ -518,7 +531,7 @@ ctrl_cmd(struct socket_server *ss, union socket_message *result) {
 
 // return -1 (ignore) when error
 static int
-forward_message(struct socket_server *ss, struct socket *s, union socket_message * result) {
+forward_message(struct socket_server *ss, struct socket *s, struct socket_message * result) {
 	int sz = s->size;
 	char * buffer = MALLOC(sz);
 	int n = (int)read(s->fd, buffer, sz);
@@ -532,7 +545,9 @@ forward_message(struct socket_server *ss, struct socket *s, union socket_message
 			break;
 		default:
 			// close when error
-			result->error.id = s->id;
+			result->id = s->id;
+			result->ud = 0;
+			result->data = NULL;
 			force_close(ss, s);
 			return SOCKET_ERROR;
 		}
@@ -540,7 +555,9 @@ forward_message(struct socket_server *ss, struct socket *s, union socket_message
 	}
 	if (n==0) {
 		FREE(buffer);
-		result->close.id = s->id;
+		result->id = s->id;
+		result->ud = 0;
+		result->data = NULL;
 		force_close(ss, s);
 		return SOCKET_CLOSE;
 	}
@@ -556,43 +573,45 @@ forward_message(struct socket_server *ss, struct socket *s, union socket_message
 		s->size /= 2;
 	}
 
-	result->data.id = s->id;
-	result->data.size = n;
-	result->data.data = buffer;
+	result->id = s->id;
+	result->ud = n;
+	result->data = buffer;
 	return SOCKET_DATA;
 }
 
 static int
-report_connect(struct socket_server *ss, struct socket *s, union socket_message *result) {
+report_connect(struct socket_server *ss, struct socket *s, struct socket_message *result) {
 	int error;
 	socklen_t len = sizeof(error);  
 	int code = getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &len);  
 	if (code < 0 || error) {  
-		result->error.id = s->id;
+		result->id = s->id;
+		result->ud = 0;
+		result->data = NULL;
 		force_close(ss,s);
 		return SOCKET_ERROR;
 	} else {
 		s->type = SOCKET_TYPE_CONNECTED;
-		result->open.id = s->id;
-		result->open.fd = s->fd;
+		result->id = s->id;
+		result->ud = 0;
 		sp_write(ss->event_fd, s->fd, s, false);
 		union sockaddr_all u;
 		socklen_t slen = sizeof(u);
 		if (getpeername(s->fd, &u.s, &slen) == 0) {
 			void * sin_addr = (u.s.sa_family == AF_INET) ? (void*)&u.v4.sin_addr : (void *)&u.v6.sin6_addr;
 			if (inet_ntop(u.s.sa_family, sin_addr, ss->buffer, sizeof(ss->buffer))) {
-				result->open.addr = ss->buffer;
+				result->data = ss->buffer;
 				return SOCKET_OPEN;
 			}
 		}
-		result->open.addr = NULL;
+		result->data = NULL;
 		return SOCKET_OPEN;
 	}
 }
 
 // return 0 when failed
 static int
-report_accept(struct socket_server *ss, struct socket *s, union socket_message *result) {
+report_accept(struct socket_server *ss, struct socket *s, struct socket_message *result) {
 	union sockaddr_all u;
 	socklen_t len = sizeof(u);
 	int client_fd = accept(s->fd, &u.s, &len);
@@ -611,14 +630,13 @@ report_accept(struct socket_server *ss, struct socket *s, union socket_message *
 		return 0;
 	}
 	ns->type = SOCKET_TYPE_CONNECTED;
-	result->accept.id = id;
-	result->accept.listen = s->id;
-	result->accept.fd = ns->fd;
-	result->accept.addr = NULL;
+	result->id = id;
+	result->ud = s->id;
+	result->data = NULL;
 
 	void * sin_addr = (u.s.sa_family == AF_INET) ? (void*)&u.v4.sin_addr : (void *)&u.v6.sin6_addr;
 	if (inet_ntop(u.s.sa_family, sin_addr, ss->buffer, sizeof(ss->buffer))) {
-		result->accept.addr = ss->buffer;
+		result->data = ss->buffer;
 	}
 
 	return 1;
@@ -626,7 +644,7 @@ report_accept(struct socket_server *ss, struct socket *s, union socket_message *
 
 // return type
 int 
-socket_server_poll(struct socket_server *ss, union socket_message * result) {
+socket_server_poll(struct socket_server *ss, struct socket_message * result) {
 	for (;;) {
 		if (ss->event_index == ss->event_n) {
 			ss->event_n = sp_wait(ss->event_fd, ss->ev, MAX_EVENT);

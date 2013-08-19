@@ -10,34 +10,15 @@
 
 struct socket_server;
 
-union socket_message {
-	struct {
-		int id;
-		int size;
-		char * data;
-	} data;
-	struct {
-		int id;
-	} close;
-	struct {
-		int id;
-		int fd;
-		char * addr;
-	} open;
-	struct {
-		int id;
-		int listen;
-		int fd;
-		char * addr;
-	} accept;
-	struct {
-		int id;
-	} error;
+struct socket_message {
+	int id;
+	int ud;	// for accept, ud is listen id ; for data, ud is size of data 
+	char * data;
 };
 
 struct socket_server * socket_server_create();
 void socket_server_release(struct socket_server *);
-int socket_server_poll(struct socket_server *, union socket_message *result);
+int socket_server_poll(struct socket_server *, struct socket_message *result);
 
 void socket_server_exit(struct socket_server *);
 void socket_server_close(struct socket_server *, int id);

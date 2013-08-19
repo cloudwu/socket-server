@@ -9,27 +9,27 @@
 static void *
 _poll(void * ud) {
 	struct socket_server *ss = ud;
-	union socket_message result;
+	struct socket_message result;
 	for (;;) {
 		int type = socket_server_poll(ss, &result);
 		switch (type) {
 		case SOCKET_EXIT:
 			return NULL;
 		case SOCKET_DATA:
-			printf("message [id=%d] size=%d\n",result.data.id, result.data.size);
-			free(result.data.data);
+			printf("message [id=%d] size=%d\n",result.id, result.ud);
+			free(result.data);
 			break;
 		case SOCKET_CLOSE:
-			printf("close [id=%d]\n",result.close.id);
+			printf("close [id=%d]\n",result.id);
 			break;
 		case SOCKET_OPEN:
-			printf("open [id=%d] %s\n",result.open.id,result.open.addr);
+			printf("open [id=%d] %s\n",result.id,result.data);
 			break;
 		case SOCKET_ERROR:
-			printf("error [id=%d]\n",result.error.id);
+			printf("error [id=%d]\n",result.id);
 			break;
 		case SOCKET_ACCEPT:
-			printf("accept [id=%d %s] from [%d]\n",result.accept.id, result.accept.addr, result.accept.listen);
+			printf("accept [id=%d %s] from [%d]\n",result.id, result.data, result.ud);
 			break;
 		}
 	}
