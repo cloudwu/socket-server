@@ -16,20 +16,20 @@ _poll(void * ud) {
 		case SOCKET_EXIT:
 			return NULL;
 		case SOCKET_DATA:
-			printf("message [id=%d] size=%d\n",result.id, result.ud);
+			printf("message(%lu) [id=%d] size=%d\n",result.opaque,result.id, result.ud);
 			free(result.data);
 			break;
 		case SOCKET_CLOSE:
-			printf("close [id=%d]\n",result.id);
+			printf("close(%lu) [id=%d]\n",result.opaque,result.id);
 			break;
 		case SOCKET_OPEN:
-			printf("open [id=%d] %s\n",result.id,result.data);
+			printf("open(%lu) [id=%d] %s\n",result.opaque,result.id,result.data);
 			break;
 		case SOCKET_ERROR:
-			printf("error [id=%d]\n",result.id);
+			printf("error(%lu) [id=%d]\n",result.opaque,result.id);
 			break;
 		case SOCKET_ACCEPT:
-			printf("accept [id=%d %s] from [%d]\n",result.id, result.data, result.ud);
+			printf("accept(%lu) [id=%d %s] from [%d]\n",result.opaque, result.id, result.data, result.ud);
 			break;
 		}
 	}
@@ -40,11 +40,11 @@ test(struct socket_server *ss) {
 	pthread_t pid;
 	pthread_create(&pid, NULL, _poll, ss);
 
-	int c = socket_server_connect(ss,"127.0.0.1",80);
+	int c = socket_server_connect(ss,100,"127.0.0.1",80);
 	printf("connecting %d\n",c);
-	int l = socket_server_listen(ss,"127.0.0.1",8888,32);
+	int l = socket_server_listen(ss,200,"127.0.0.1",8888,32);
 	printf("listening %d\n",l);
-	int b = socket_server_bind(ss,1);
+	int b = socket_server_bind(ss,300,1);
 	printf("binding stdin %d\n",b);
 	sleep(5);
 	socket_server_exit(ss);

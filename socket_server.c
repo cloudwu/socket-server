@@ -40,6 +40,7 @@ struct socket {
 	int id;
 	int type;
 	int size;
+	uintptr_t opaque;
 	struct write_buffer * head;
 	struct write_buffer * tail;
 };
@@ -59,6 +60,7 @@ struct socket_server {
 struct request_open {
 	int id;
 	int port;
+	uintptr_t opaque;
 	char host[1];
 };
 
@@ -70,18 +72,21 @@ struct request_send {
 
 struct request_close {
 	int id;
+	uintptr_t opaque;
 };
 
 struct request_listen {
 	int id;
 	int port;
 	int backlog;
+	uintptr_t opaque;
 	char host[1];
 };
 
 struct request_bind {
 	int id;
 	int fd;
+	uintptr_t opaque;
 };
 
 struct request_package {
@@ -168,7 +173,11 @@ socket_server_create() {
 }
 
 static void
-force_close(struct socket_server *ss, struct socket *s) {
+force_close(struct socket_server *ss, struct socket *s, struct socket_message *result) {
+	result->id = s->id;
+	result->ud = 0;
+	result->data = NULL;
+	result->opaque = s->opaque;
 	if (s->type == SOCKET_TYPE_INVALID) {
 		return;
 	}
@@ -191,10 +200,11 @@ force_close(struct socket_server *ss, struct socket *s) {
 void 
 socket_server_release(struct socket_server *ss) {
 	int i;
+	struct socket_message dummy;
 	for (i=0;i<MAX_SOCKET;i++) {
 		struct socket *s = &ss->slot[i];
 		if (s->type != SOCKET_TYPE_RESERVE) {
-			force_close(ss, s);
+			force_close(ss, s , &dummy);
 		}
 	}
 	close(ss->client_fd);
@@ -227,7 +237,7 @@ block_read(int fd, void * buffer, int sz) {
 }
 
 static struct socket *
-new_fd(struct socket_server *ss, int id, int fd) {
+new_fd(struct socket_server *ss, int id, int fd, uintptr_t opaque) {
 	struct socket * s = &ss->slot[id % MAX_SOCKET];
 	assert(s->type == SOCKET_TYPE_RESERVE);
 
@@ -239,6 +249,7 @@ new_fd(struct socket_server *ss, int id, int fd) {
 	s->id = id;
 	s->fd = fd;
 	s->size = MIN_READ_BUFFER;
+	s->opaque = opaque;
 	assert(s->head == NULL);
 	assert(s->tail == NULL);
 	return s;
@@ -284,7 +295,7 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 		goto _failed;
 	}
 
-	ns = new_fd(ss, id, sock);
+	ns = new_fd(ss, id, sock, request->opaque);
 	if (ns == NULL) {
 		close(sock);
 		goto _failed;
@@ -292,6 +303,7 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 
 	if(status == 0) {
 		ns->type = SOCKET_TYPE_CONNECTED;
+		result->opaque = request->opaque;
 		result->id = ns->id;
 		result->ud = 0;
 		struct sockaddr * addr = ai_ptr->ai_addr;
@@ -313,6 +325,7 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 _failed:
 	freeaddrinfo( ai_list );
 	ss->slot[id % MAX_SOCKET].type = SOCKET_TYPE_INVALID;
+	result->opaque = request->opaque;
 	result->id = 0;
 	result->ud = 0;
 	result->data = NULL;
@@ -332,10 +345,7 @@ send_buffer(struct socket_server *ss, struct socket *s, struct socket_message *r
 				case EAGAIN:
 					return 0;
 				}
-				result->id = s->id;
-				result->ud = 0;
-				result->data = NULL;
-				force_close(ss,s);
+				force_close(ss,s, result);
 				return SOCKET_CLOSE;
 			}
 			if (sz != tmp->sz) {
@@ -373,9 +383,7 @@ send_socket(struct socket_server *ss, struct request_send * request, struct sock
 				break;
 			default:
 				fprintf(stderr, "socket-server: write to %d (fd=%d) error.",id,s->fd);
-				result->id = id;
-				result->ud = 0;
-				result->data = NULL;
+				force_close(ss,s,result);
 				return SOCKET_CLOSE;
 			}
 		}
@@ -435,7 +443,7 @@ listen_socket(struct socket_server *ss, struct request_listen * request, struct 
 	if (listen(listen_fd, request->backlog) == -1) {
 		goto _failed;
 	}
-	struct socket *s = new_fd(ss, id, listen_fd);
+	struct socket *s = new_fd(ss, id, listen_fd, request->opaque);
 	if (s == NULL) {
 		goto _failed;
 	}
@@ -444,6 +452,7 @@ listen_socket(struct socket_server *ss, struct request_listen * request, struct 
 _failed:
 	close(listen_fd);
 _failed_noclose:
+	result->opaque = request->opaque;
 	result->id = id;
 	result->ud = 0;
 	result->data = NULL;
@@ -458,6 +467,7 @@ close_socket(struct socket_server *ss, struct request_close *request, struct soc
 	struct socket * s = &ss->slot[id % MAX_SOCKET];
 	if (s->type == SOCKET_TYPE_INVALID || s->id != id) {
 		result->id = id;
+		result->opaque = request->opaque;
 		result->ud = 0;
 		result->data = NULL;
 		return SOCKET_CLOSE;
@@ -468,10 +478,9 @@ close_socket(struct socket_server *ss, struct request_close *request, struct soc
 			return type;
 	}
 	if (s->head == NULL) {
-		force_close(ss,s);
+		force_close(ss,s,result);
 		result->id = id;
-		result->ud = 0;
-		result->data = NULL;
+		result->opaque = request->opaque;
 		return SOCKET_CLOSE;
 	}
 	s->type = SOCKET_TYPE_HALFCLOSE;
@@ -482,17 +491,16 @@ close_socket(struct socket_server *ss, struct request_close *request, struct soc
 static int
 bind_socket(struct socket_server *ss, struct request_bind *request, struct socket_message *result) {
 	int id = request->id;
-	struct socket *s = new_fd(ss, id, request->fd);
+	result->id = id;
+	result->opaque = request->opaque;
+	result->ud = 0;
+	struct socket *s = new_fd(ss, id, request->fd, request->opaque);
 	if (s == NULL) {
-		result->id = id;
-		result->ud = 0;
 		result->data = NULL;
 		return SOCKET_ERROR;
 	}
 	sp_nonblocking(request->fd);
 	s->type = SOCKET_TYPE_BIND;
-	result->id = s->id;
-	result->ud = 0;
 	result->data = "binding";
 	return SOCKET_OPEN;
 }
@@ -518,6 +526,7 @@ ctrl_cmd(struct socket_server *ss, struct socket_message *result) {
 	case 'O':
 		return open_socket(ss, (struct request_open *)buffer, result);
 	case 'X':
+		result->opaque = 0;
 		result->id = 0;
 		result->ud = 0;
 		result->data = NULL;
@@ -548,20 +557,14 @@ forward_message(struct socket_server *ss, struct socket *s, struct socket_messag
 			break;
 		default:
 			// close when error
-			result->id = s->id;
-			result->ud = 0;
-			result->data = NULL;
-			force_close(ss, s);
+			force_close(ss, s, result);
 			return SOCKET_ERROR;
 		}
 		return -1;
 	}
 	if (n==0) {
 		FREE(buffer);
-		result->id = s->id;
-		result->ud = 0;
-		result->data = NULL;
-		force_close(ss, s);
+		force_close(ss, s, result);
 		return SOCKET_CLOSE;
 	}
 
@@ -576,6 +579,7 @@ forward_message(struct socket_server *ss, struct socket *s, struct socket_messag
 		s->size /= 2;
 	}
 
+	result->opaque = s->opaque;
 	result->id = s->id;
 	result->ud = n;
 	result->data = buffer;
@@ -588,13 +592,11 @@ report_connect(struct socket_server *ss, struct socket *s, struct socket_message
 	socklen_t len = sizeof(error);  
 	int code = getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &len);  
 	if (code < 0 || error) {  
-		result->id = s->id;
-		result->ud = 0;
-		result->data = NULL;
-		force_close(ss,s);
+		force_close(ss,s, result);
 		return SOCKET_ERROR;
 	} else {
 		s->type = SOCKET_TYPE_CONNECTED;
+		result->opaque = s->opaque;
 		result->id = s->id;
 		result->ud = 0;
 		sp_write(ss->event_fd, s->fd, s, false);
@@ -627,12 +629,13 @@ report_accept(struct socket_server *ss, struct socket *s, struct socket_message 
 		return 0;
 	}
 	sp_nonblocking(client_fd);
-	struct socket *ns = new_fd(ss, id, client_fd);
+	struct socket *ns = new_fd(ss, id, client_fd, s->opaque);
 	if (ns == NULL) {
 		close(client_fd);
 		return 0;
 	}
 	ns->type = SOCKET_TYPE_CONNECTED;
+	result->opaque = s->opaque;
 	result->id = id;
 	result->ud = s->id;
 	result->data = NULL;
@@ -702,7 +705,7 @@ send_request(struct socket_server *ss, struct request_package *request, char typ
 }
 
 int 
-socket_server_connect(struct socket_server *ss, const char * addr, int port) {
+socket_server_connect(struct socket_server *ss, uintptr_t opaque, const char * addr, int port) {
 	struct request_package request;
 	int len = strlen(addr);
 	if (len + sizeof(request.u.open) > sizeof(request.u)) {
@@ -710,6 +713,7 @@ socket_server_connect(struct socket_server *ss, const char * addr, int port) {
 		return 0;
 	}
 	int id = reverve_id(ss);
+	request.u.open.opaque = opaque;
 	request.u.open.id = id;
 	request.u.open.port = port;
 	strcpy(request.u.open.host, addr);
@@ -742,14 +746,15 @@ socket_server_exit(struct socket_server *ss) {
 }
 
 void
-socket_server_close(struct socket_server *ss, int id) {
+socket_server_close(struct socket_server *ss, uintptr_t opaque, int id) {
 	struct request_package request;
 	request.u.close.id = id;
+	request.u.close.opaque = opaque;
 	send_request(ss, &request, 'K', sizeof(request.u.close));
 }
 
 int 
-socket_server_listen(struct socket_server *ss, const char * addr, int port, int backlog) {
+socket_server_listen(struct socket_server *ss, uintptr_t opaque, const char * addr, int port, int backlog) {
 	struct request_package request;
 	int len = (addr!=NULL) ? strlen(addr) : 0;
 	if (len + sizeof(request.u.listen) > sizeof(request.u)) {
@@ -757,6 +762,7 @@ socket_server_listen(struct socket_server *ss, const char * addr, int port, int 
 		return 0;
 	}
 	int id = reverve_id(ss);
+	request.u.listen.opaque = opaque;
 	request.u.listen.id = id;
 	request.u.listen.port = port;
 	request.u.listen.backlog = backlog;
@@ -770,9 +776,10 @@ socket_server_listen(struct socket_server *ss, const char * addr, int port, int 
 }
 
 int
-socket_server_bind(struct socket_server *ss, int fd) {
+socket_server_bind(struct socket_server *ss, uintptr_t opaque, int fd) {
 	struct request_package request;
 	int id = reverve_id(ss);
+	request.u.bind.opaque = opaque;
 	request.u.bind.id = id;
 	request.u.bind.fd = fd;
 	send_request(ss, &request, 'B', sizeof(request.u.bind));
