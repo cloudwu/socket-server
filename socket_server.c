@@ -46,8 +46,8 @@ struct socket {
 };
 
 struct socket_server {
-	int server_fd;
-	int client_fd;
+	int recvctrl_fd;
+	int sendctrl_fd;
 	poll_fd event_fd;
 	int alloc_id;
 	int event_n;
@@ -140,13 +140,13 @@ socket_server_create() {
 		fprintf(stderr, "socket-server: create event pool failed.\n");
 		return NULL;
 	}
-	if (socketpair(AF_UNIX,SOCK_SEQPACKET,0,fd)) {
+	if (pipe(fd)) {
 		sp_release(efd);
 		fprintf(stderr, "socket-server: create socket pair failed.\n");
 		return NULL;
 	}
 	if (sp_add(efd, fd[0], NULL)) {
-		// add server_fd to event poll
+		// add recvctrl_fd to event poll
 		fprintf(stderr, "socket-server: can't add server fd to event pool.\n");
 		close(fd[0]);
 		close(fd[1]);
@@ -156,8 +156,8 @@ socket_server_create() {
 
 	struct socket_server *ss = MALLOC(sizeof(*ss));
 	ss->event_fd = efd;
-	ss->server_fd = fd[0];
-	ss->client_fd = fd[1];
+	ss->recvctrl_fd = fd[0];
+	ss->sendctrl_fd = fd[1];
 
 	for (i=0;i<MAX_SOCKET;i++) {
 		struct socket *s = &ss->slot[i];
@@ -207,8 +207,8 @@ socket_server_release(struct socket_server *ss) {
 			force_close(ss, s , &dummy);
 		}
 	}
-	close(ss->client_fd);
-	close(ss->server_fd);
+	close(ss->sendctrl_fd);
+	close(ss->recvctrl_fd);
 	sp_release(ss->event_fd);
 	FREE(ss);
 }
@@ -236,6 +236,10 @@ new_fd(struct socket_server *ss, int id, int fd, uintptr_t opaque) {
 static int
 open_socket(struct socket_server *ss, struct request_open * request, struct socket_message *result) {
 	int id = request->id;
+	result->opaque = request->opaque;
+	result->id = id;
+	result->ud = 0;
+	result->data = NULL;
 	struct socket *ns;
 	int status;
 	struct addrinfo ai_hints;
@@ -280,15 +284,10 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 
 	if(status == 0) {
 		ns->type = SOCKET_TYPE_CONNECTED;
-		result->opaque = request->opaque;
-		result->id = ns->id;
-		result->ud = 0;
 		struct sockaddr * addr = ai_ptr->ai_addr;
 		void * sin_addr = (ai_ptr->ai_family == AF_INET) ? (void*)&((struct sockaddr_in *)addr)->sin_addr : (void*)&((struct sockaddr_in6 *)addr)->sin6_addr;
 		if (inet_ntop(ai_ptr->ai_family, sin_addr, ss->buffer, sizeof(ss->buffer))) {
 			result->data = ss->buffer;
-		} else {
-			result->data = NULL;
 		}
 		freeaddrinfo( ai_list );
 		return SOCKET_OPEN;
@@ -302,10 +301,6 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 _failed:
 	freeaddrinfo( ai_list );
 	ss->slot[id % MAX_SOCKET].type = SOCKET_TYPE_INVALID;
-	result->opaque = request->opaque;
-	result->id = 0;
-	result->ud = 0;
-	result->data = NULL;
 	return SOCKET_ERROR;
 }
 
@@ -482,28 +477,33 @@ bind_socket(struct socket_server *ss, struct request_bind *request, struct socke
 	return SOCKET_OPEN;
 }
 
-// return type
-static int
-ctrl_cmd(struct socket_server *ss, struct socket_message *result) {
-	int fd = ss->server_fd;
-	// the length of message is one byte, so 256+8 buffer size is enough.
-	uint8_t message[256+8];
-	uint8_t *header = message+6;
+static void
+block_readpipe(int pipefd, void *buffer, int sz) {
 	for (;;) {
-		int n = read(fd, header, sizeof(message));
+		int n = read(pipefd, buffer, sz);
 		if (n<0) {
 			if (errno == EINTR)
 				continue;
-			return -1;
+			fprintf(stderr, "socket-server : read pipe error %s.",strerror(errno));
+			return;
 		}
-		int len = header[1];
-		assert(n == 2 + len);
-		break;
+		// must atomic read from a pipe
+		assert(n == sz);
+		return;
 	}
+}
 
+// return type
+static int
+ctrl_cmd(struct socket_server *ss, struct socket_message *result) {
+	int fd = ss->recvctrl_fd;
+	// the length of message is one byte, so 256+8 buffer size is enough.
+	uint8_t buffer[256];
+	uint8_t header[2];
+	block_readpipe(fd, header, sizeof(header));
 	int type = header[0];
-	// align buffer 
-	uint8_t * buffer = message + 8;
+	int len = header[1];
+	block_readpipe(fd, buffer, len);
 	// ctrl command only exist in local fd, so don't worry about endian.
 	switch (type) {
 	case 'B':
@@ -691,7 +691,7 @@ send_request(struct socket_server *ss, struct request_package *request, char typ
 	request->header[6] = (uint8_t)type;
 	request->header[7] = (uint8_t)len;
 	for (;;) {
-		int n = write(ss->client_fd, &request->header[6], len+2);
+		int n = write(ss->sendctrl_fd, &request->header[6], len+2);
 		if (n<0) {
 			if (errno != EINTR) {
 				fprintf(stderr, "socket-server : send ctrl command error %s.\n", strerror(errno));
