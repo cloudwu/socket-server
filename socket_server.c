@@ -140,7 +140,7 @@ socket_server_create() {
 		fprintf(stderr, "socket-server: create event pool failed.\n");
 		return NULL;
 	}
-	if (socketpair(AF_UNIX,SOCK_STREAM,0,fd)) {
+	if (socketpair(AF_UNIX,SOCK_SEQPACKET,0,fd)) {
 		sp_release(efd);
 		fprintf(stderr, "socket-server: create socket pair failed.\n");
 		return NULL;
@@ -211,29 +211,6 @@ socket_server_release(struct socket_server *ss) {
 	close(ss->server_fd);
 	sp_release(ss->event_fd);
 	FREE(ss);
-}
-
-static void
-block_read(int fd, void * buffer, int sz) {
-	char * buf = (char *)buffer;
-	for (;;) {
-		int n = read(fd, buf, sz);
-		if (n < 0) {
-			switch (errno) {
-			case EINTR:
-				continue;
-			default:
-				fprintf(stderr, "socket-server: ctrl fd error : %d.\n", errno);
-				exit(1);
-			}
-		}
-		if (n < sz) {
-			buf+=n;
-			sz-=n;
-		} else {
-			return;
-		}
-	}
 }
 
 static struct socket *
@@ -509,13 +486,25 @@ bind_socket(struct socket_server *ss, struct request_bind *request, struct socke
 static int
 ctrl_cmd(struct socket_server *ss, struct socket_message *result) {
 	int fd = ss->server_fd;
-	uint8_t header[2];
-	block_read(fd, header, sizeof(header));
+	// the length of message is one byte, so 256+8 buffer size is enough.
+	uint8_t message[256+8];
+	uint8_t *header = message+6;
+	for (;;) {
+		int n = read(fd, header, sizeof(message));
+		if (n<0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		int len = header[1];
+		assert(n == 2 + len);
+		break;
+	}
+
 	int type = header[0];
-	int len = header[1];
-	char buffer[256];
+	// align buffer 
+	uint8_t * buffer = message + 8;
 	// ctrl command only exist in local fd, so don't worry about endian.
-	block_read(fd, buffer, len);
 	switch (type) {
 	case 'B':
 		return bind_socket(ss,(struct request_bind *)buffer, result);
@@ -701,7 +690,17 @@ static void
 send_request(struct socket_server *ss, struct request_package *request, char type, int len) {
 	request->header[6] = (uint8_t)type;
 	request->header[7] = (uint8_t)len;
-	write(ss->client_fd, &request->header[6], len+2);
+	for (;;) {
+		int n = write(ss->client_fd, &request->header[6], len+2);
+		if (n<0) {
+			if (errno != EINTR) {
+				fprintf(stderr, "socket-server : send ctrl command error %s.\n", strerror(errno));
+			}
+			continue;
+		}
+		assert(n == len+2);
+		return;
+	}
 }
 
 int 
