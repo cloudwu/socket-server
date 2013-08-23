@@ -11,7 +11,7 @@ _poll(void * ud) {
 	struct socket_server *ss = ud;
 	struct socket_message result;
 	for (;;) {
-		int type = socket_server_poll(ss, &result);
+		int type = socket_server_poll(ss, &result, NULL);
 		// DO NOT use any ctrl command (socket_server_close , etc. ) in this thread.
 		switch (type) {
 		case SOCKET_EXIT:
@@ -30,7 +30,7 @@ _poll(void * ud) {
 			printf("error(%lu) [id=%d]\n",result.opaque,result.id);
 			break;
 		case SOCKET_ACCEPT:
-			printf("accept(%lu) [id=%d %s] from [%d]\n",result.opaque, result.id, result.data, result.ud);
+			printf("accept(%lu) [id=%d %s] from [%d]\n",result.opaque, result.ud, result.data, result.id);
 			break;
 		}
 	}
@@ -45,6 +45,7 @@ test(struct socket_server *ss) {
 	printf("connecting %d\n",c);
 	int l = socket_server_listen(ss,200,"127.0.0.1",8888,32);
 	printf("listening %d\n",l);
+	socket_server_start(ss,201,l);
 	int b = socket_server_bind(ss,300,1);
 	printf("binding stdin %d\n",b);
 	int i;
