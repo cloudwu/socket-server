@@ -118,7 +118,7 @@ union sockaddr_all {
 #define FREE free
 
 static int
-reverve_id(struct socket_server *ss) {
+reserve_id(struct socket_server *ss) {
 	int i;
 	for (i=0;i<MAX_SOCKET;i++) {
 		int id = __sync_add_and_fetch(&(ss->alloc_id), 1);
@@ -637,7 +637,7 @@ report_accept(struct socket_server *ss, struct socket *s, struct socket_message 
 	if (client_fd < 0) {
 		return 0;
 	}
-	int id = reverve_id(ss);
+	int id = reserve_id(ss);
 	if (id < 0) {
 		close(client_fd);
 		return 0;
@@ -739,7 +739,7 @@ open_request(struct socket_server *ss, struct request_package *req, uintptr_t op
 		fprintf(stderr, "socket-server : Invalid addr %s.\n",addr);
 		return 0;
 	}
-	int id = reverve_id(ss);
+	int id = reserve_id(ss);
 	req->u.open.opaque = opaque;
 	req->u.open.id = id;
 	req->u.open.port = port;
@@ -843,7 +843,7 @@ socket_server_listen(struct socket_server *ss, uintptr_t opaque, const char * ad
 		return -1;
 	}
 	struct request_package request;
-	int id = reverve_id(ss);
+	int id = reserve_id(ss);
 	request.u.listen.opaque = opaque;
 	request.u.listen.id = id;
 	request.u.listen.fd = fd;
@@ -854,7 +854,7 @@ socket_server_listen(struct socket_server *ss, uintptr_t opaque, const char * ad
 int
 socket_server_bind(struct socket_server *ss, uintptr_t opaque, int fd) {
 	struct request_package request;
-	int id = reverve_id(ss);
+	int id = reserve_id(ss);
 	request.u.bind.opaque = opaque;
 	request.u.bind.id = id;
 	request.u.bind.fd = fd;
