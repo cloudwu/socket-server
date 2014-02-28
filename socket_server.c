@@ -41,6 +41,7 @@ struct socket {
 	int id;
 	int type;
 	int size;
+	int64_t wb_size;
 	uintptr_t opaque;
 	struct write_buffer * head;
 	struct write_buffer * tail;
@@ -49,6 +50,7 @@ struct socket {
 struct socket_server {
 	int recvctrl_fd;
 	int sendctrl_fd;
+	int checkctrl;
 	poll_fd event_fd;
 	int alloc_id;
 	int event_n;
@@ -56,6 +58,7 @@ struct socket_server {
 	struct event ev[MAX_EVENT];
 	struct socket slot[MAX_SOCKET];
 	char buffer[MAX_INFO];
+	fd_set rfds;
 };
 
 struct request_open {
@@ -117,6 +120,12 @@ union sockaddr_all {
 #define MALLOC malloc
 #define FREE free
 
+static void
+socket_keepalive(int fd) {
+	int keepalive = 1;
+	setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (void *)&keepalive , sizeof(keepalive));  
+}
+
 static int
 reserve_id(struct socket_server *ss) {
 	int i;
@@ -165,6 +174,7 @@ socket_server_create() {
 	ss->event_fd = efd;
 	ss->recvctrl_fd = fd[0];
 	ss->sendctrl_fd = fd[1];
+	ss->checkctrl = 1;
 
 	for (i=0;i<MAX_SOCKET;i++) {
 		struct socket *s = &ss->slot[i];
@@ -175,6 +185,8 @@ socket_server_create() {
 	ss->alloc_id = 0;
 	ss->event_n = 0;
 	ss->event_index = 0;
+	FD_ZERO(&ss->rfds);
+	assert(ss->recvctrl_fd < FD_SETSIZE);
 
 	return ss;
 }
@@ -238,6 +250,7 @@ new_fd(struct socket_server *ss, int id, int fd, uintptr_t opaque, bool add) {
 	s->fd = fd;
 	s->size = MIN_READ_BUFFER;
 	s->opaque = opaque;
+	s->wb_size = 0;
 	assert(s->head == NULL);
 	assert(s->tail == NULL);
 	return s;
@@ -273,6 +286,7 @@ open_socket(struct socket_server *ss, struct request_open * request, struct sock
 		if ( sock < 0 ) {
 			continue;
 		}
+		socket_keepalive(sock);
 		if (!blocking) {
 			sp_nonblocking(sock);
 		}
@@ -336,6 +350,7 @@ send_buffer(struct socket_server *ss, struct socket *s, struct socket_message *r
 				force_close(ss,s, result);
 				return SOCKET_CLOSE;
 			}
+			s->wb_size -= sz;
 			if (sz != tmp->sz) {
 				tmp->ptr += sz;
 				tmp->sz -= sz;
@@ -356,6 +371,24 @@ send_buffer(struct socket_server *ss, struct socket *s, struct socket_message *r
 	}
 
 	return -1;
+}
+
+static void
+append_sendbuffer(struct socket *s, struct request_send * request, int n) {
+	struct write_buffer * buf = MALLOC(sizeof(*buf));
+	buf->ptr = request->buffer+n;
+	buf->sz = request->sz - n;
+	buf->buffer = request->buffer;
+	buf->next = NULL;
+	s->wb_size += buf->sz;
+	if (s->head == NULL) {
+		s->head = s->tail = buf;
+	} else {
+		assert(s->tail != NULL);
+		assert(s->tail->next == NULL);
+		s->tail->next = buf;
+		s->tail = buf;
+	}
 }
 
 static int
@@ -387,25 +420,10 @@ send_socket(struct socket_server *ss, struct request_send * request, struct sock
 			FREE(request->buffer);
 			return -1;
 		}
-
-		struct write_buffer * buf = MALLOC(sizeof(*buf));
-		buf->next = NULL;
-		buf->ptr = request->buffer+n;
-		buf->sz = request->sz - n;
-		buf->buffer = request->buffer;
-		s->head = s->tail = buf;
-
+		append_sendbuffer(s, request, n);
 		sp_write(ss->event_fd, s->fd, s, true);
 	} else {
-		struct write_buffer * buf = MALLOC(sizeof(*buf));
-		buf->ptr = request->buffer;
-		buf->buffer = request->buffer;
-		buf->sz = request->sz;
-		assert(s->tail != NULL);
-		assert(s->tail->next == NULL);
-		buf->next = s->tail->next;
-		s->tail->next = buf;
-		s->tail = buf;
+		append_sendbuffer(s, request, 0);
 	}
 	return -1;
 }
@@ -513,6 +531,20 @@ block_readpipe(int pipefd, void *buffer, int sz) {
 		assert(n == sz);
 		return;
 	}
+}
+
+static int
+has_cmd(struct socket_server *ss) {
+	struct timeval tv = {0,0};
+	int retval;
+
+	FD_SET(ss->recvctrl_fd, &ss->rfds);
+
+	retval = select(ss->recvctrl_fd+1, &ss->rfds, NULL, NULL, &tv);
+	if (retval == 1) {
+		return 1;
+	}
+	return 0;
 }
 
 // return type
@@ -642,6 +674,7 @@ report_accept(struct socket_server *ss, struct socket *s, struct socket_message 
 		close(client_fd);
 		return 0;
 	}
+	socket_keepalive(client_fd);
 	sp_nonblocking(client_fd);
 	struct socket *ns = new_fd(ss, id, client_fd, s->opaque, false);
 	if (ns == NULL) {
@@ -662,12 +695,25 @@ report_accept(struct socket_server *ss, struct socket *s, struct socket_message 
 	return 1;
 }
 
+
 // return type
 int 
 socket_server_poll(struct socket_server *ss, struct socket_message * result, int * more) {
 	for (;;) {
+		if (ss->checkctrl) {
+			if (has_cmd(ss)) {
+				int type = ctrl_cmd(ss, result);
+				if (type != -1)
+					return type;
+				else
+					continue;
+			} else {
+				ss->checkctrl = 0;
+			}
+		}
 		if (ss->event_index == ss->event_n) {
 			ss->event_n = sp_wait(ss->event_fd, ss->ev, MAX_EVENT);
+			ss->checkctrl = 1;
 			if (more) {
 				*more = 0;
 			}
@@ -680,11 +726,8 @@ socket_server_poll(struct socket_server *ss, struct socket_message * result, int
 		struct event *e = &ss->ev[ss->event_index++];
 		struct socket *s = e->s;
 		if (s == NULL) {
-			int type = ctrl_cmd(ss, result);
-			if (type != -1)
-				return type;
-			else
-				continue;
+			// dispatch pipe message at beginning
+			continue;
 		}
 		switch (s->type) {
 		case SOCKET_TYPE_CONNECTING:
@@ -771,7 +814,7 @@ socket_server_block_connect(struct socket_server *ss, uintptr_t opaque, const ch
 }
 
 // return -1 when error
-int 
+int64_t 
 socket_server_send(struct socket_server *ss, int id, const void * buffer, int sz) {
 	struct socket * s = &ss->slot[id % MAX_SOCKET];
 	if (s->id != id || s->type == SOCKET_TYPE_INVALID) {
@@ -785,7 +828,7 @@ socket_server_send(struct socket_server *ss, int id, const void * buffer, int sz
 	request.u.send.buffer = (char *)buffer;
 
 	send_request(ss, &request, 'D', sizeof(request.u.send));
-	return 0;
+	return s->wb_size;
 }
 
 void
