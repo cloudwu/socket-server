@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <inttypes.h>
 
 static void *
 _poll(void * ud) {
@@ -17,20 +18,20 @@ _poll(void * ud) {
 		case SOCKET_EXIT:
 			return NULL;
 		case SOCKET_DATA:
-			printf("message(%u) [id=%d] size=%d\n",result.opaque,result.id, result.ud);
+			printf("message(%" PRIxPTR ") [id=%d] size=%d\n",result.opaque,result.id, result.ud);
 			free(result.data);
 			break;
 		case SOCKET_CLOSE:
-			printf("close(%u) [id=%d]\n",result.opaque,result.id);
+			printf("close(%" PRIxPTR ") [id=%d]\n",result.opaque,result.id);
 			break;
 		case SOCKET_OPEN:
-			printf("open(%u) [id=%d] %s\n",result.opaque,result.id,result.data);
+			printf("open(%" PRIxPTR ") [id=%d] %s\n",result.opaque,result.id,result.data);
 			break;
 		case SOCKET_ERROR:
-			printf("error(%u) [id=%d]\n",result.opaque,result.id);
+			printf("error(%" PRIxPTR ") [id=%d]\n",result.opaque,result.id);
 			break;
 		case SOCKET_ACCEPT:
-			printf("accept(%u) [id=%d %s] from [%d]\n",result.opaque, result.ud, result.data, result.id);
+			printf("accept(%" PRIxPTR ") [id=%d %s] from [%d]\n",result.opaque, result.ud, result.data, result.id);
 			break;
 		}
 	}
