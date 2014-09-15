@@ -17,20 +17,20 @@ _poll(void * ud) {
 		case SOCKET_EXIT:
 			return NULL;
 		case SOCKET_DATA:
-			printf("message(%lu) [id=%d] size=%d\n",result.opaque,result.id, result.ud);
+			printf("message(%u) [id=%d] size=%d\n",result.opaque,result.id, result.ud);
 			free(result.data);
 			break;
 		case SOCKET_CLOSE:
-			printf("close(%lu) [id=%d]\n",result.opaque,result.id);
+			printf("close(%u) [id=%d]\n",result.opaque,result.id);
 			break;
 		case SOCKET_OPEN:
-			printf("open(%lu) [id=%d] %s\n",result.opaque,result.id,result.data);
+			printf("open(%u) [id=%d] %s\n",result.opaque,result.id,result.data);
 			break;
 		case SOCKET_ERROR:
-			printf("error(%lu) [id=%d]\n",result.opaque,result.id);
+			printf("error(%u) [id=%d]\n",result.opaque,result.id);
 			break;
 		case SOCKET_ACCEPT:
-			printf("accept(%lu) [id=%d %s] from [%d]\n",result.opaque, result.ud, result.data, result.id);
+			printf("accept(%u) [id=%d %s] from [%d]\n",result.opaque, result.ud, result.data, result.id);
 			break;
 		}
 	}
