@@ -4,9 +4,9 @@
 #include <stdint.h>
 
 // custom malloc/free
-//#define	SOCKET_SERVER_FILE_MEMAPI	skynet.h
-//#define	SOCKET_SERVER_MALLOC		skynet_malloc
-//#define	SOCKET_SERVER_FREE			skynet_free
+//#define SOCKET_SERVER_FILE_MEMAPI   skynet.h
+//#define SOCKET_SERVER_MALLOC        skynet_malloc
+//#define SOCKET_SERVER_FREE          skynet_free
 
 #define SOCKET_DATA 0
 #define SOCKET_CLOSE 1
