@@ -1,3 +1,11 @@
+#ifdef SOCKET_SERVER_FILE_MEMAPI
+#	define	STRINIFY_(S)	#S
+#	define	STRINIFY(S)		STRINIFY_(S)
+#	include	STRINIFY(SOCKET_SERVER_FILE_MEMAPI)
+#	undef	STRINIFY
+#	undef	STRINIFY_
+#endif
+
 #include "socket_server.h"
 #include "socket_poll.h"
 
