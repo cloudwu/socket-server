@@ -1302,11 +1302,19 @@ socket_server_connect(struct socket_server *ss, uintptr_t opaque, const char * a
 	return request.u.open.id;
 }
 
+static void
+free_buffer(struct socket_server *ss, const void * buffer, int sz) {
+	struct send_object so;
+	send_object_init(ss, &so, (void *)buffer, sz);
+	so.free_func((void *)buffer);
+}
+
 // return -1 when error
 int64_t
 socket_server_send(struct socket_server *ss, int id, const void * buffer, int sz) {
 	struct socket * s = &ss->slot[HASH_ID(id)];
 	if (s->id != id || s->type == SOCKET_TYPE_INVALID) {
+		free_buffer(ss, buffer, sz);
 		return -1;
 	}
 
@@ -1323,6 +1331,7 @@ void
 socket_server_send_lowpriority(struct socket_server *ss, int id, const void * buffer, int sz) {
 	struct socket * s = &ss->slot[HASH_ID(id)];
 	if (s->id != id || s->type == SOCKET_TYPE_INVALID) {
+		free_buffer(ss, buffer, sz);
 		return;
 	}
 
@@ -1505,6 +1514,7 @@ int64_t
 socket_server_udp_send(struct socket_server *ss, int id, const struct socket_udp_address *addr, const void *buffer, int sz) {
 	struct socket * s = &ss->slot[HASH_ID(id)];
 	if (s->id != id || s->type == SOCKET_TYPE_INVALID) {
+		free_buffer(ss, buffer, sz);
 		return -1;
 	}
 
@@ -1523,6 +1533,7 @@ socket_server_udp_send(struct socket_server *ss, int id, const struct socket_udp
 		addrsz = 1+2+16;	// 1 type, 2 port, 16 ipv6
 		break;
 	default:
+		free_buffer(ss, buffer, sz);
 		return -1;
 	}
 
